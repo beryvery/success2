@@ -21,17 +21,19 @@
 | `editpipe/cuts.py` | 무음(ffmpeg silencedetect) + 필러 검출 → `cuts.json` → trim/atrim+concat 으로 재인코딩 |
 | `editpipe/detect.py` | Vision OCR·얼굴 검출, 정규식/브랜드 사전, LLM 텍스트 판별·로고 비전 검출, 트랙 병합 |
 | `editpipe/mosaic.py` | ffmpeg rawvideo 파이프 ↔ numpy 픽셀화 (OpenCV 미사용) |
-| `editpipe/illustrate.py` | LLM 계획 → SVG 생성 → resvg PNG → ffmpeg overlay. `object`(투명, 화면 한쪽) / `card`(중앙 카드) |
+| `editpipe/illustrate.py` | LLM 계획 → 그림 생성(`gpt-image`: OpenAI images API 투명 PNG / `svg`: LLM SVG → resvg) → compose 오버레이. `object`(투명, 화면 한쪽) / `card`(중앙 카드). ThreadPool 병렬 |
+| `editpipe/compose.py` | 공통 PNG 오버레이 합성기 (rawvideo 파이프 + numpy 알파 블렌딩, 페이드). 모든 오버레이는 이걸 통해서만 |
+| `editpipe/visuals.py` | 자막(전사 기반, PII 마스킹)·키워드 lower-third·챕터 칩을 PIL 로 렌더 후 compose |
 | `editpipe/llm_client.py` | Claude(Anthropic SDK)·GPT(OpenAI SDK) 공통 호출. 키는 `api_keys.txt` → `.env` → 환경변수 순 |
 | `config.yaml` | 모든 기본값(무음 기준, 필러 목록, 정규식, 모자이크 강도, 일러스트 스타일, 모델명) |
 
 ## 작업 산출물 규칙
-- 영상별 작업 폴더 `out/<영상이름>/` 에 `transcript.json → cuts.json → 1_cut.mp4 → detections.json → 2_mosaic.mp4 → illustrations/plan.json, ill_XX.png → 3_illustrated.mp4` 순서로 생성.
+- 영상별 작업 폴더 `out/<영상이름>/` 에 `transcript.json → cuts.json → 1_cut.mp4 → detections.json → 2_mosaic.mp4 → illustrations/plan.json, ill_XX.png → 3_illustrated.mp4 → visuals.json → 4_visuals.mp4` 순서로 생성.
 - 각 단계는 산출물이 있으면 재계산하지 않음(`force` 로 강제). 앞 단계를 다시 만들면 뒤 단계 파일은 삭제해 무효화한다.
 - 타임스탬프는 **컷 편집 이후 타임라인** 기준(`transcript_cut.json`). 검출·일러스트는 모두 `1_cut.mp4` 기준으로 계산.
 
 ## 코드 작성 시 지킬 것
-- ffmpeg 9 기준: 필터 그래프가 길면 `-/filter_complex <파일>` 사용 (`-filter_complex_script` 는 제거됨). `drawtext` 는 이 빌드에 없음.
+- ffmpeg 9 기준: 필터 그래프가 길면 `-/filter_complex <파일>` 사용 (`-filter_complex_script` 는 제거됨). `drawtext`·`subtitles`(libass) 는 이 빌드에 없음 → 텍스트/자막은 PIL 로 PNG 렌더 후 `compose.py` 로 합성.
 - `faster-whisper`(av) 와 OpenCV 를 한 프로세스에 함께 import 하면 libavdevice 충돌 → OpenCV 를 쓰지 않는다.
 - LLM 호출은 반드시 `llm_client.ask / ask_json` 을 통해서만. Claude 는 `client.beta.messages.create(... fallbacks="default", betas=["server-side-fallback-2026-07-01"])`, 응답의 `stop_reason` 확인. 모델명은 `config.yaml llm.*` 에서만 읽는다.
 - LLM 이 반환한 SVG 는 `_sanitize_svg` 로 `<script>`/`<image>` 제거 + XML 검증 후 렌더.
@@ -41,5 +43,6 @@
 
 ## 테스트
 - `tests/test_units.py` : 컷 목록, 타임라인 재매핑, 정규식, 트랙 병합, 픽셀화, SVG 렌더.
+- `tests/test_visuals.py` : 자막 줄 나누기, PII 마스킹, 렌더 투명도, compose 합성, visuals 적용.
 - 통합 확인: `samples/test_video.mp4`(한국어 TTS + 화면 속 전화번호/이메일) 로 `pipeline.py ... --no-claude` 실행 후 `out/test_video/report.md` 확인.
 - 새 테스트 영상이 필요하면 `say -v Yuna` 로 음성을 만들고 PNG 오버레이로 텍스트를 넣는다(README 참고).

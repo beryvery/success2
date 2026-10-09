@@ -2,7 +2,7 @@
 """영상 자동 편집 파이프라인.
 
 사용법:
-  python pipeline.py 입력영상.mp4 --script 대본.txt [--out out/] [--steps cut,detect,mosaic,illustrate]
+  python pipeline.py 입력영상.mp4 [--script 대본.txt] [--out out/] [--steps cut,detect,mosaic,illustrate,visuals]
   python pipeline.py 사진.jpg                      # 이미지 모자이크만
 옵션:
   --force        기존 중간 결과 무시하고 다시 계산
@@ -28,6 +28,7 @@ from editpipe.illustrate import generate_illustrations, overlay_illustrations, p
 from editpipe.media import fmt_time, is_image, probe
 from editpipe.mosaic import apply_mosaic_image, apply_mosaic_video
 from editpipe.transcribe import remap_transcript, transcribe
+from editpipe.visuals import apply_visuals, plan_visuals
 
 ROOT = Path(__file__).resolve().parent
 
@@ -36,7 +37,7 @@ def log(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def write_report(work: Path, cuts: dict | None, det: dict | None, ills: list[dict] | None, final: Path | None):
+def write_report(work: Path, cuts: dict | None, det: dict | None, ills: list[dict] | None, final: Path | None, vis: dict | None = None):
     lines = ["# 편집 리포트", ""]
     if cuts:
         lines += [f"## 컷 편집", f"- 원본 {cuts['source_duration']:.1f}초 → 결과 {cuts['result_duration']:.1f}초 (제거 {cuts['removed_seconds']:.1f}초, {len(cuts['removed'])}곳)",
@@ -55,6 +56,13 @@ def write_report(work: Path, cuts: dict | None, det: dict | None, ills: list[dic
         lines += ["## 설명 일러스트", f"- {len(ills)}개 삽입. 파일: `illustrations/`, 계획: `illustrations/plan.json`", ""]
         for i in ills:
             lines.append(f"- {fmt_time(i['start'])} ({i['duration']}s) [{i.get('kind', 'object')}] {i['concept']} — \"{i.get('text', '')}\"")
+        lines.append("")
+    if vis is not None:
+        lines += ["## 자막·시각 요소", f"- 자막 {len(vis.get('subtitles', []))}줄, 키워드 강조 {len(vis.get('keywords', []))}개, 챕터 {len(vis.get('chapters', []))}개 (`visuals.json`)", ""]
+        for c in vis.get("chapters", []):
+            lines.append(f"- 챕터 {fmt_time(c['start'])} {c['title']}")
+        for k in vis.get("keywords", []):
+            lines.append(f"- 키워드 {fmt_time(k['start'])} {k['text']} ({k.get('sub', '')})")
         lines.append("")
     if final:
         lines += ["## 결과", f"- 최종 파일: `{final}`"]
@@ -79,7 +87,7 @@ def main(argv=None):
     ap.add_argument("--script", help="대본 텍스트 파일")
     ap.add_argument("--out", default="out", help="출력 폴더")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
-    ap.add_argument("--steps", default="cut,detect,mosaic,illustrate")
+    ap.add_argument("--steps", default="cut,detect,mosaic,illustrate,visuals")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--no-claude", action="store_true")
     ap.add_argument("--faces", action="store_true")
@@ -113,7 +121,7 @@ def main(argv=None):
         info = probe(src)
         log(f"=== {src.name}  {info['width']}x{info['height']} {info['fps']:.2f}fps {info['duration']:.1f}s ===")
         current = src
-        cuts = det = ills = None
+        cuts = det = ills = vis = None
 
         # 1. 전사
         log("전사(Whisper) 중...")
@@ -153,6 +161,8 @@ def main(argv=None):
                 log("일러스트 계획/생성 중...")
                 try:
                     plan = plan_illustrations(script, tr, work, cfg, args.force)
+                    from editpipe.illustrate import engine
+                    log(f"  계획 {len(plan)}개 → 생성 엔진 {engine(cfg)}, 병렬 {cfg['illustrate'].get('parallel', 4)}")
                     ills = generate_illustrations(plan, work, cfg, args.force)
                     log(f"  일러스트 {len(ills)}개")
                     if not args.dry_run:
@@ -162,12 +172,22 @@ def main(argv=None):
                 except RuntimeError as e:
                     log(f"  일러스트 실패: {e}")
 
+        # 5. 자막·키워드·챕터
+        if "visuals" in steps:
+            log("자막·시각 요소 생성 중" + (" (키워드/챕터는 LLM)" if use_claude else " (자막만)") + "...")
+            vis = plan_visuals(script, tr, work, cfg, args.force)
+            log(f"  자막 {len(vis['subtitles'])}줄, 키워드 {len(vis['keywords'])}개, 챕터 {len(vis['chapters'])}개")
+            if not args.dry_run:
+                vis_file = work / "4_visuals.mp4"
+                apply_visuals(current, vis, work, cfg, vis_file)
+                current = vis_file
+
         final = None
         if not args.dry_run and current != src:
             final = out_root / f"{src.stem}_edited.mp4"
             shutil.copyfile(current, final)
             log(f"완료 → {final}")
-        write_report(work, cuts, det, ills, final)
+        write_report(work, cuts, det, ills, final, vis)
         log(f"리포트: {work / 'report.md'}")
 
 

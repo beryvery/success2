@@ -1,9 +1,9 @@
 """개인정보/상표 검출: macOS Vision OCR + 얼굴 검출 + 정규식 + (선택) Claude 판별/로고 검출."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -178,6 +178,7 @@ def detect_video(video: Path, work: Path, cfg: dict, force: bool = False, use_cl
     unknown_texts: set[str] = set()
     prev_thumb, last_logo_t = None, -1e9
     logo_frames = 0
+    logo_jobs: list[tuple[float, Path]] = []   # LLM 로고 검출 대상 (병렬 처리)
     for t, fp in frames:
         for o in ocr_image(fp):
             txt = o["text"].strip()
@@ -196,21 +197,39 @@ def detect_video(video: Path, work: Path, cfg: dict, force: bool = False, use_cl
             th = _thumb(fp)
             if scene_changed(prev_thumb, th, float(d["logo_scene_threshold"])) or t - last_logo_t >= float(d["logo_max_interval"]):
                 prev_thumb, last_logo_t = th, t
-                logo_frames += 1
-                try:
-                    for lg in detect_logos_claude(fp, cfg):
-                        hits.append({"t": t, "type": "brand", "label": f"로고: {lg['label']}", "box": lg["box"]})
-                except RuntimeError as e:
-                    print(f"  [로고검출 건너뜀 {t:.1f}s] {e}")
-    # Claude 텍스트 판별 (이름/주소/상표명 등 정규식이 못 잡는 것)
+                logo_jobs.append((t, fp))
+    workers = int(d.get("parallel", 4))
+    # LLM 로고 검출 (프레임별 병렬)
+    if logo_jobs:
+        logo_frames = len(logo_jobs)
+
+        def _logo(job):
+            t, fp = job
+            try:
+                return [{"t": t, "type": "brand", "label": f"로고: {lg['label']}", "box": lg["box"]} for lg in detect_logos_claude(fp, cfg)]
+            except RuntimeError as e:
+                print(f"  [로고검출 건너뜀 {t:.1f}s] {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for res in ex.map(_logo, logo_jobs):
+                hits.extend(res)
+    # LLM 텍스트 판별 (이름/주소/상표명 등 정규식이 못 잡는 것) — 배치 병렬
     claude_hits = {}
     if claude_ok and d.get("claude_text_classify") and unknown_texts:
         texts = sorted(unknown_texts)
-        for i in range(0, len(texts), 150):
+        batches = [texts[i:i + 100] for i in range(0, len(texts), 100)]
+
+        def _cls(batch):
             try:
-                claude_hits.update(classify_text_claude(texts[i:i + 150], cfg))
+                return classify_text_claude(batch, cfg)
             except RuntimeError as e:
                 print(f"  [텍스트 판별 건너뜀] {e}")
+                return {}
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for res in ex.map(_cls, batches):
+                claude_hits.update(res)
         for txt, (typ, label) in claude_hits.items():
             for occ in ocr_cache.get(txt, []):
                 hits.append({"t": occ["t"], "type": typ, "label": f"{label}: {txt}", "box": occ["box"]})

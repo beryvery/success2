@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENV_FILES = [ROOT / "api_keys.txt", ROOT / ".env"]   # 둘 다 읽음 (먼저 적힌 파일 우선)
 _env_loaded = False
 KEY_SOURCE: dict[str, str] = {}   # 어느 파일에서 읽었는지
+BAD_KEYS: set[str] = set()         # 인증 실패한 제공자 (auto 모드에서 제외)
 
 
 def load_env_file(paths: list[Path] | None = None) -> None:
@@ -66,9 +67,9 @@ def provider(cfg: dict) -> str | None:
         return "claude" if _has_claude() else None
     if want == "openai":
         return "openai" if _has_openai() else None
-    if _has_claude():
+    if _has_claude() and "claude" not in BAD_KEYS:
         return "claude"
-    if _has_openai():
+    if _has_openai() and "openai" not in BAD_KEYS:
         return "openai"
     return None
 
@@ -125,7 +126,7 @@ def _ask_claude(cfg, prompt, images, max_tokens, effort, stream):
         else:
             resp = client.beta.messages.create(**kwargs)
     except anthropic.AuthenticationError as e:
-        raise RuntimeError("Claude API 인증 실패: .env 의 ANTHROPIC_API_KEY 확인") from e
+        raise RuntimeError("Claude API 인증 실패: api_keys.txt(.env) 의 ANTHROPIC_API_KEY 확인") from e
     except anthropic.RateLimitError as e:
         raise RuntimeError("Claude API 요청 한도 초과") from e
     except anthropic.APIStatusError as e:
@@ -140,6 +141,22 @@ def _ask_claude(cfg, prompt, images, max_tokens, effort, stream):
 
 
 # ---------------- OpenAI (GPT) ----------------
+def openai_error(e) -> str:
+    """OpenAI 오류를 사용자용 한 줄 메시지로."""
+    body = getattr(e, "body", None) or {}
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    code = (err.get("code") or err.get("type") or "") if isinstance(err, dict) else ""
+    msg = (err.get("message") if isinstance(err, dict) else None) or str(e)
+    if code in ("credit_balance_exhausted", "insufficient_quota"):
+        return "OpenAI 크레딧 없음 → https://platform.openai.com/settings/organization/billing 에서 충전 필요"
+    if code == "model_not_found":
+        return f"OpenAI 모델을 찾을 수 없음 → config.yaml 의 llm.openai_model / illustrate.openai_image_model 확인 ({msg[:80]})"
+    status = getattr(e, "status_code", "")
+    if status == 429:
+        return f"OpenAI 요청 한도 초과: {msg[:120]}"
+    return f"OpenAI API 오류 {status} {code}: {msg[:120]}"
+
+
 def _ask_openai(cfg, prompt, images, max_tokens, effort, stream):
     import openai
 
@@ -163,11 +180,9 @@ def _ask_openai(cfg, prompt, images, max_tokens, effort, stream):
             else:
                 raise
     except openai.AuthenticationError as e:
-        raise RuntimeError("OpenAI API 인증 실패: .env 의 OPENAI_API_KEY 확인") from e
-    except openai.RateLimitError as e:
-        raise RuntimeError("OpenAI API 요청 한도/잔액 초과") from e
+        raise RuntimeError("OpenAI API 인증 실패: api_keys.txt(.env) 의 OPENAI_API_KEY 확인") from e
     except openai.APIStatusError as e:
-        raise RuntimeError(f"OpenAI API 오류 {e.status_code}: {e.message}") from e
+        raise RuntimeError(openai_error(e)) from e
     except openai.APIConnectionError as e:
         raise RuntimeError("OpenAI API 네트워크 오류") from e
     choice = resp.choices[0]
@@ -181,11 +196,26 @@ def _ask_openai(cfg, prompt, images, max_tokens, effort, stream):
 def ask(cfg: dict, prompt: str, images: list[Path] | None = None, max_tokens: int = 16000,
         effort: str = "medium", stream: bool = False) -> str:
     p = provider(cfg)
+    auto = (cfg.get("llm", {}).get("provider") or "auto").lower() == "auto"
     if p == "claude":
-        return _ask_claude(cfg, prompt, images, max_tokens, effort, stream)
+        try:
+            return _ask_claude(cfg, prompt, images, max_tokens, effort, stream)
+        except RuntimeError as e:
+            if auto and "인증 실패" in str(e) and _has_openai():
+                BAD_KEYS.add("claude")
+                print("  [LLM] Claude 키 인증 실패 → GPT(OpenAI)로 전환")
+                return _ask_openai(cfg, prompt, images, max_tokens, effort, stream)
+            raise
     if p == "openai":
-        return _ask_openai(cfg, prompt, images, max_tokens, effort, stream)
-    raise RuntimeError("LLM API 키가 없습니다 (.env 의 ANTHROPIC_API_KEY 또는 OPENAI_API_KEY).")
+        try:
+            return _ask_openai(cfg, prompt, images, max_tokens, effort, stream)
+        except RuntimeError as e:
+            if auto and "인증 실패" in str(e) and _has_claude() and "claude" not in BAD_KEYS:
+                BAD_KEYS.add("openai")
+                print("  [LLM] OpenAI 키 인증 실패 → Claude로 전환")
+                return _ask_claude(cfg, prompt, images, max_tokens, effort, stream)
+            raise
+    raise RuntimeError("LLM API 키가 없습니다 (api_keys.txt 의 ANTHROPIC_API_KEY 또는 OPENAI_API_KEY).")
 
 
 def ask_json(cfg: dict, prompt: str, images: list[Path] | None = None, **kw):

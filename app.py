@@ -16,10 +16,11 @@ import yaml
 from editpipe import llm_client as llm
 from editpipe.cuts import apply_cuts, plan_cuts
 from editpipe.detect import detect_image, detect_video
-from editpipe.illustrate import generate_one, overlay_illustrations, plan_illustrations, render_svg, save_plan, canvas_for
+from editpipe.illustrate import engine as ill_engine, generate_illustrations, generate_one, overlay_illustrations, plan_illustrations, save_plan
 from editpipe.media import fmt_time, is_image, probe
 from editpipe.mosaic import apply_mosaic_image, apply_mosaic_video
 from editpipe.transcribe import remap_transcript, transcribe
+from editpipe.visuals import apply_visuals, plan_visuals, save_visuals
 
 ROOT = Path(__file__).resolve().parent
 UPLOAD = ROOT / "uploads"
@@ -60,7 +61,7 @@ def wj(p: Path, data):
 def current_video() -> Path:
     """가장 마지막 단계까지 완료된 영상."""
     w = work_dir()
-    for name in ("3_illustrated.mp4", "2_mosaic.mp4", "1_cut.mp4"):
+    for name in ("4_visuals.mp4", "3_illustrated.mp4", "2_mosaic.mp4", "1_cut.mp4"):
         if (w / name).exists():
             return w / name
     return Path(ss.src)
@@ -95,6 +96,15 @@ with st.sidebar:
     cfg["illustrate"]["object_width"] = st.slider("오브젝트 크기(화면 폭 대비)", 0.15, 0.4, float(cfg["illustrate"]["object_width"]), 0.01)
     cfg["illustrate"]["card_width"] = st.slider("카드 크기(화면 폭 대비)", 0.4, 0.8, float(cfg["illustrate"]["card_width"]), 0.02)
     cfg["illustrate"]["max_count"] = st.number_input("최대 삽입 수", 1, 20, int(cfg["illustrate"]["max_count"]))
+    cfg["illustrate"]["engine"] = st.selectbox("그림 생성 엔진", ["auto", "gpt-image", "svg"],
+                                               index=["auto", "gpt-image", "svg"].index(cfg["illustrate"].get("engine", "auto")),
+                                               help="gpt-image: OpenAI 이미지 생성(OPENAI_API_KEY 필요) / svg: LLM이 SVG 작성 / auto: OpenAI 키 있으면 gpt-image")
+    cfg["illustrate"]["parallel"] = st.slider("동시 생성 수(병렬)", 1, 8, int(cfg["illustrate"].get("parallel", 4)))
+    st.caption(f"현재 엔진: {ill_engine(cfg)}")
+    st.caption("자막·시각 요소")
+    cfg["visuals"]["subtitles"] = st.checkbox("자막", value=bool(cfg["visuals"]["subtitles"]))
+    cfg["visuals"]["keywords"] = st.checkbox("키워드 강조 (LLM)", value=bool(cfg["visuals"]["keywords"]), disabled=not prov)
+    cfg["visuals"]["chapters"] = st.checkbox("챕터 타이틀 (LLM)", value=bool(cfg["visuals"]["chapters"]), disabled=not prov)
     st.divider()
     with st.expander("로그"):
         st.code("\n".join(ss.log[-40:]) or "-")
@@ -123,9 +133,12 @@ with c1:
         else:
             st.error("파일이 없습니다.")
 with c2:
-    script_file = st.file_uploader("대본 (txt, 선택)", type=["txt", "md"])
-    script_text = st.text_area("대본 내용", script_file.getvalue().decode("utf-8", "ignore") if script_file else "", height=150,
-                               placeholder="대본을 붙여 넣거나 파일을 올리세요. 일러스트 지점 선정에 사용됩니다.")
+    use_script = st.checkbox("대본 사용 (일러스트·키워드·챕터 선정에 참고. 없어도 발화 내용으로 동작)", value=False)
+    script_text = ""
+    if use_script:
+        script_file = st.file_uploader("대본 (txt)", type=["txt", "md"])
+        script_text = st.text_area("대본 내용", script_file.getvalue().decode("utf-8", "ignore") if script_file else "", height=150,
+                                   placeholder="대본을 붙여 넣거나 파일을 올리세요.")
 
 if not ss.src:
     st.info("파일을 올리면 버튼이 나타납니다.")
@@ -166,10 +179,11 @@ tr_json = work / "transcript.json"
 cuts_json = work / "cuts.json"
 det_json = work / "detections.json"
 plan_json = work / "illustrations" / "plan.json"
-cut_mp4, mos_mp4, ill_mp4 = work / "1_cut.mp4", work / "2_mosaic.mp4", work / "3_illustrated.mp4"
+cut_mp4, mos_mp4, ill_mp4, vis_mp4 = work / "1_cut.mp4", work / "2_mosaic.mp4", work / "3_illustrated.mp4", work / "4_visuals.mp4"
+vis_json = work / "visuals.json"
 
-b1, b2, b3, b4, b5, b6 = st.columns(6)
-run_all = b6.button("▶ 전체 실행", type="primary", use_container_width=True)
+b1, b2, b3, b4, b5, b6, b7 = st.columns(7)
+run_all = b7.button("▶ 전체 실행", type="primary", use_container_width=True)
 
 
 def step_transcribe(force=False):
@@ -187,7 +201,7 @@ def step_cut(force=False):
         plan = plan_cuts(src, tr, work, cfg, force)
         wj(work / "transcript_cut.json", remap_transcript(tr, plan["keep"]))
         apply_cuts(src, plan, cut_mp4, cfg)
-        for f in (mos_mp4, ill_mp4, det_json):     # 이후 단계 무효화
+        for f in (mos_mp4, ill_mp4, vis_mp4, det_json):     # 이후 단계 무효화
             f.unlink(missing_ok=True)
         log(f"컷 편집: {plan['source_duration']:.1f}s → {plan['result_duration']:.1f}s (제거 {len(plan['removed'])}곳)")
 
@@ -196,8 +210,8 @@ def step_detect(force=False):
     base = cut_mp4 if cut_mp4.exists() else src
     with st.spinner("③ 개인정보/상표 검출 중 (OCR" + (", LLM" if use_llm else "") + ")..."):
         det = detect_video(base, work, cfg, force, use_llm)
-        mos_mp4.unlink(missing_ok=True)
-        ill_mp4.unlink(missing_ok=True)
+        for f in (mos_mp4, ill_mp4, vis_mp4):
+            f.unlink(missing_ok=True)
         log(f"검출 {len(det['tracks'])}건")
 
 
@@ -210,6 +224,7 @@ def step_mosaic():
     with st.spinner("④ 모자이크 적용 중..."):
         apply_mosaic_video(base, det["tracks"], mos_mp4, cfg)
         ill_mp4.unlink(missing_ok=True)
+        vis_mp4.unlink(missing_ok=True)
         log("모자이크 완료")
 
 
@@ -225,24 +240,26 @@ def step_plan_ill(force=False):
 
 def step_render_ill(force=False):
     plan = rj(plan_json) or []
-    done = []
-    prog = st.progress(0, "일러스트 생성 중...")
-    for i, p in enumerate(plan, 1):
-        png = work / "illustrations" / f"ill_{i:02d}.png"
-        if force or not png.exists():
-            try:
-                generate_one(p, i, work, cfg)
-            except RuntimeError as e:
-                log(str(e))
-                prog.progress(i / len(plan))
-                continue
-        done.append({**p, "png": str(png)})
-        prog.progress(i / len(plan), f"일러스트 {i}/{len(plan)}")
+    prog = st.progress(0, f"일러스트 생성 중... (엔진 {ill_engine(cfg)}, 병렬 {cfg['illustrate']['parallel']})")
+    done = generate_illustrations(plan, work, cfg, force, progress=lambda d, n, m: prog.progress(d / n, m))
     prog.empty()
     base = mos_mp4 if mos_mp4.exists() else (cut_mp4 if cut_mp4.exists() else src)
     with st.spinner("일러스트 오버레이 중..."):
         overlay_illustrations(base, done, ill_mp4, cfg)
-    log(f"일러스트 {len(done)}개 삽입 완료")
+    vis_mp4.unlink(missing_ok=True)
+    log(f"일러스트 {len(done)}개 삽입 완료 ({ill_engine(cfg)})")
+
+
+def step_visuals(force=False):
+    tr = cut_transcript()
+    if tr is None:
+        step_transcribe()
+        tr = cut_transcript()
+    with st.spinner("⑥ 자막·키워드·챕터 생성 중..."):
+        data = plan_visuals(script_text, tr, work, cfg, force)
+        base = ill_mp4 if ill_mp4.exists() else (mos_mp4 if mos_mp4.exists() else (cut_mp4 if cut_mp4.exists() else src))
+        apply_visuals(base, data, work, cfg, vis_mp4)
+        log(f"시각 요소: 자막 {len(data['subtitles'])}줄, 키워드 {len(data['keywords'])}개, 챕터 {len(data['chapters'])}개")
 
 
 def safe(*fns) -> bool:
@@ -271,11 +288,15 @@ if b4.button("④ 모자이크", use_container_width=True):
     safe(step_mosaic)
 if b5.button("⑤ 일러스트", use_container_width=True, disabled=not use_llm):
     safe(partial(step_plan_ill, force=True), partial(step_render_ill, force=True))
+if b6.button("⑥ 자막·강조", use_container_width=True):
+    safe(partial(step_visuals, force=True))
 if run_all:
     ok = safe(step_transcribe, step_cut, step_detect, step_mosaic)
     if ok and use_llm:
         if not safe(step_plan_ill, step_render_ill):
-            st.warning("일러스트 단계는 실패했지만 컷 편집·모자이크 결과는 사용할 수 있습니다.")
+            st.warning("일러스트 단계는 실패했지만 나머지 결과는 사용할 수 있습니다.")
+    if ok:
+        safe(step_visuals)
     if ok:
         final = OUT / f"{src.stem}_edited.mp4"
         shutil.copyfile(current_video(), final)
@@ -283,7 +304,7 @@ if run_all:
         st.success(f"완료: {final}")
 
 st.divider()
-tab_cut, tab_det, tab_ill, tab_out = st.tabs(["✂️ 컷 편집 검수", "🟦 모자이크 검수", "🎨 일러스트 검수", "📦 결과"])
+tab_cut, tab_det, tab_ill, tab_vis, tab_out = st.tabs(["✂️ 컷 편집 검수", "🟦 모자이크 검수", "🎨 일러스트 검수", "📝 자막·강조 검수", "📦 결과"])
 
 # ── 컷 편집 검수 ──
 with tab_cut:
@@ -307,7 +328,7 @@ with tab_cut:
             wj(work / "transcript_cut.json", remap_transcript(tr, new_plan["keep"]))
             with st.spinner("재인코딩..."):
                 apply_cuts(src, new_plan, cut_mp4, cfg)
-            for f in (mos_mp4, ill_mp4, det_json):
+            for f in (mos_mp4, ill_mp4, vis_mp4, det_json):
                 f.unlink(missing_ok=True)
             log("컷 편집 수정 적용")
             st.rerun()
@@ -341,7 +362,7 @@ with tab_ill:
     if plan is None:
         st.caption("⑤ 일러스트를 먼저 실행하세요. (LLM 키 필요)")
     else:
-        st.markdown(f"계획 **{len(plan)}개** · object = 투명 배경 오브젝트(화면 한쪽), card = 중앙 카드")
+        st.markdown(f"계획 **{len(plan)}개** · 엔진 **{ill_engine(cfg)}** · object = 투명 배경 오브젝트(화면 한쪽), card = 중앙 카드")
         new_plan = []
         for i, p in enumerate(plan, 1):
             png = work / "illustrations" / f"ill_{i:02d}.png"
@@ -383,6 +404,35 @@ with tab_ill:
                 st.rerun()
         if ill_mp4.exists():
             st.video(str(ill_mp4))
+
+# ── 자막·강조 검수 ──
+with tab_vis:
+    vis = rj(vis_json)
+    if vis is None:
+        st.caption("⑥ 자막·강조를 먼저 실행하세요.")
+    else:
+        st.markdown(f"자막 **{len(vis.get('subtitles', []))}줄** · 키워드 **{len(vis.get('keywords', []))}개** · 챕터 **{len(vis.get('chapters', []))}개**"
+                    + (f" · LLM 오류: {vis['llm_error']}" if vis.get("llm_error") else ""))
+        st.caption("챕터 (시작 초, 제목)")
+        ch_df = st.data_editor(pd.DataFrame(vis.get("chapters", []) or [{"start": 0.0, "title": ""}]), num_rows="dynamic",
+                               hide_index=True, use_container_width=True, key="ch_editor")
+        st.caption("키워드 강조 (시작 초, 길이, 핵심어, 보충 설명)")
+        kw_df = st.data_editor(pd.DataFrame(vis.get("keywords", []) or [{"start": 0.0, "duration": 4.0, "text": "", "sub": ""}]),
+                               num_rows="dynamic", hide_index=True, use_container_width=True, key="kw_editor")
+        with st.expander(f"자막 {len(vis.get('subtitles', []))}줄 보기/수정"):
+            sub_df = st.data_editor(pd.DataFrame(vis.get("subtitles", [])), num_rows="dynamic", hide_index=True,
+                                    use_container_width=True, key="sub_editor")
+        if st.button("💾 저장하고 다시 적용", type="primary"):
+            vis["chapters"] = [r for r in ch_df.fillna("").to_dict("records") if str(r.get("title", "")).strip()]
+            vis["keywords"] = [r for r in kw_df.fillna("").to_dict("records") if str(r.get("text", "")).strip()]
+            vis["subtitles"] = [r for r in sub_df.fillna("").to_dict("records") if str(r.get("text", "")).strip()]
+            save_visuals(vis, work)
+            base = ill_mp4 if ill_mp4.exists() else (mos_mp4 if mos_mp4.exists() else (cut_mp4 if cut_mp4.exists() else src))
+            if safe(lambda: apply_visuals(base, vis, work, cfg, vis_mp4)):
+                log("시각 요소 수정 적용")
+                st.rerun()
+        if vis_mp4.exists():
+            st.video(str(vis_mp4))
 
 # ── 결과 ──
 with tab_out:

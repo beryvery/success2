@@ -42,6 +42,7 @@ detect:
   claude_logo_detect: true     # 그림 로고/상표를 LLM 비전으로 검출
   logo_scene_threshold: 0.25   # 장면 변화 감지 민감도(0~1, 낮을수록 민감)
   logo_max_interval: 6         # 장면이 안 바뀌어도 이 간격(초)마다 재검사
+  parallel: 4                  # LLM 로고검출/텍스트판별 동시 요청 수
 
 mosaic:
   block: 16                # 모자이크 블록 크기(px, 1080p 기준 자동 스케일)
@@ -50,6 +51,10 @@ mosaic:
 
 illustrate:
   enabled: true
+  engine: auto               # svg(LLM이 SVG 작성) | gpt-image(OpenAI 이미지 생성) | auto(OpenAI 키 있으면 gpt-image, 없으면 svg)
+  openai_image_model: gpt-image-1
+  openai_image_quality: medium   # low | medium | high
+  parallel: 4                # 동시에 생성할 그림 수
   max_count: 8               # 영상당 최대 삽입 수
   min_gap: 45                # 삽입 간 최소 간격(초)
   duration: 5                # 기본 노출 시간(초)
@@ -66,6 +71,16 @@ illustrate:
     일정한 굵기의 둥근 외곽선(#2B2B2B, 5~6px, 미세한 손그림 흔들림만), 파스텔 3~4색 제한 팔레트
     (#FFB4A2, #B5EAD7, #C7CEEA, #FFDAC1, #E2F0CB 중 선택), 단순한 기하 도형, 여백 넉넉,
     그림자·그라데이션·질감·장식 없음. 글자는 최소(최대 2단어)이며 꼭 필요할 때만.
+
+# 시각 보조 요소 (자막·키워드 강조·챕터 타이틀)
+visuals:
+  subtitles: true
+  subtitle: {size: 44, max_chars: 28, margin_bottom: 60, box_alpha: 0.6}
+  keywords: true             # 핵심어 강조(lower-third, LLM 필요)
+  keyword_max: 10
+  chapters: true             # 챕터 타이틀(LLM 필요)
+  chapter_max: 6
+  chapter_duration: 4
 
 llm:
   provider: auto               # auto | claude | openai   (auto: Claude 키 있으면 Claude, 없으면 GPT)

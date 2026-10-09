@@ -5,12 +5,16 @@ kind = "card"   : 관계/흐름/비교 등 장면. 중앙 카드로 표시
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import llm_client as llm
+from .compose import compose
 from .media import fmt_time, probe, run
 
 PLAN_PROMPT = """당신은 교육/설명 영상 편집자입니다. 아래 **대본**과 **실제 발화 타임라인(컷편집 후 기준)**을 보고,
@@ -126,13 +130,62 @@ def canvas_for(kind: str, cfg: dict) -> tuple[int, int]:
     return int(w), int(h)
 
 
-def generate_one(item: dict, idx: int, work: Path, cfg: dict) -> Path:
+IMG_OBJECT_PROMPT = """{style}
+Single {concept} icon illustration: {visual}
+Transparent background, one object centered filling ~80% of the canvas, flat vector + subtle hand-drawn cartoon feel,
+uniform rounded dark outline (#2B2B2B), pastel palette (#FFB4A2, #B5EAD7, #C7CEEA, #FFDAC1, #E2F0CB), no shadows, no gradients, no texture.
+{text_rule}"""
+
+IMG_CARD_PROMPT = """{style}
+Explanatory scene illustration: {visual}
+Draw it inside a white rounded-corner card (#FFFFFF, thin dark outline) that fills the canvas; outside the card is transparent.
+Flat vector + subtle hand-drawn cartoon feel, uniform rounded dark outline (#2B2B2B), pastel palette (#FFB4A2, #B5EAD7, #C7CEEA, #FFDAC1, #E2F0CB),
+simple geometric shapes, generous margins, thick arrows for relationships, no shadows, no gradients, no texture.
+{text_rule}"""
+
+
+def engine(cfg: dict) -> str:
+    """svg | gpt-image"""
+    e = (cfg["illustrate"].get("engine") or "auto").lower()
+    if e == "auto":
+        llm.load_env_file()
+        return "gpt-image" if os.environ.get("OPENAI_API_KEY") else "svg"
+    return "gpt-image" if e in ("gpt-image", "openai", "gpt") else "svg"
+
+
+def _gen_gpt_image(item: dict, png_path: Path, cfg: dict) -> Path:
+    import openai
+
+    il = cfg["illustrate"]
+    kind = item.get("kind", "object")
+    text = (item.get("text") or "").strip()
+    text_rule = (f'Include only the text "{text}" in large bold handwritten-style Korean lettering (Apple SD Gothic Neo look), nothing else.'
+                 if text else "No text, no letters, no numbers anywhere in the image.")
+    tpl = IMG_CARD_PROMPT if kind == "card" else IMG_OBJECT_PROMPT
+    prompt = tpl.format(style=il["style"].strip(), concept=item.get("concept", ""), visual=item.get("visual", ""), text_rule=text_rule)
+    client = openai.OpenAI()
+    try:
+        resp = client.images.generate(model=il.get("openai_image_model", "gpt-image-1"), prompt=prompt, n=1,
+                                      size="1536x1024" if kind == "card" else "1024x1024",
+                                      background="transparent", output_format="png",
+                                      quality=il.get("openai_image_quality", "medium"))
+    except openai.AuthenticationError as e:
+        raise RuntimeError("OpenAI API 인증 실패: api_keys.txt 의 OPENAI_API_KEY 확인") from e
+    except openai.APIStatusError as e:
+        raise RuntimeError("이미지 생성: " + llm.openai_error(e)) from e
+    except openai.APIConnectionError as e:
+        raise RuntimeError("OpenAI 네트워크 오류") from e
+    data = resp.data[0].b64_json
+    if not data:
+        raise RuntimeError("OpenAI 이미지 응답이 비어 있습니다.")
+    png_path.write_bytes(base64.b64decode(data))
+    return png_path
+
+
+def _gen_svg(item: dict, svg_path: Path, png_path: Path, cfg: dict) -> Path:
     il = cfg["illustrate"]
     kind = item.get("kind", "object")
     w, h = canvas_for(kind, cfg)
-    d = work / "illustrations"
-    d.mkdir(parents=True, exist_ok=True)
-    svg_path, png_path = d / f"ill_{idx:02d}.svg", d / f"ill_{idx:02d}.png"
     prompt = SVG_COMMON.format(style=il["style"], w=w, h=h, font_px=int(h / 10),
                                kind_rules=CARD_RULES if kind == "card" else OBJECT_RULES,
                                concept=item["concept"], text=item.get("text") or "(없음)", visual=item["visual"])
@@ -145,20 +198,55 @@ def generate_one(item: dict, idx: int, work: Path, cfg: dict) -> Path:
             return png_path
         except (ValueError, ET.ParseError) as e:
             last_err = e
-    raise RuntimeError(f"일러스트 {idx} 생성 실패: {last_err}")
+    raise RuntimeError(f"SVG 생성 실패: {last_err}")
 
 
-def generate_illustrations(plan: list[dict], work: Path, cfg: dict, force: bool = False) -> list[dict]:
+def generate_one(item: dict, idx: int, work: Path, cfg: dict) -> Path:
+    d = work / "illustrations"
+    d.mkdir(parents=True, exist_ok=True)
+    svg_path, png_path = d / f"ill_{idx:02d}.svg", d / f"ill_{idx:02d}.png"
+    try:
+        if engine(cfg) == "gpt-image":
+            return _gen_gpt_image(item, png_path, cfg)
+        return _gen_svg(item, svg_path, png_path, cfg)
+    except RuntimeError as e:
+        raise RuntimeError(f"일러스트 {idx} 생성 실패: {e}") from e
+
+
+def generate_illustrations(plan: list[dict], work: Path, cfg: dict, force: bool = False,
+                           progress=None) -> list[dict]:
+    """계획 항목을 병렬로 생성. progress(done, total, msg) 콜백 선택."""
+    jobs = []
+    for i, p in enumerate(plan, 1):
+        png_path = work / "illustrations" / f"ill_{i:02d}.png"
+        if force or not png_path.exists():
+            jobs.append((i, p))
+    errors: dict[int, str] = {}
+    if jobs:
+        workers = max(1, int(cfg["illustrate"].get("parallel", 4)))
+        done = 0
+
+        def _run(job):
+            i, p = job
+            try:
+                generate_one(p, i, work, cfg)
+                return i, None
+            except RuntimeError as e:
+                return i, str(e)
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for i, err in ex.map(_run, jobs):
+                done += 1
+                if err:
+                    errors[i] = err
+                    print(f"  [건너뜀] {err}")
+                if progress:
+                    progress(done, len(jobs), f"일러스트 {done}/{len(jobs)}")
     out = []
     for i, p in enumerate(plan, 1):
         png_path = work / "illustrations" / f"ill_{i:02d}.png"
-        if not png_path.exists() or force:
-            try:
-                generate_one(p, i, work, cfg)
-            except RuntimeError as e:
-                print(f"  [건너뜀] {e}")
-                continue
-        out.append({**p, "png": str(png_path)})
+        if png_path.exists() and i not in errors:
+            out.append({**p, "png": str(png_path)})
     return out
 
 
@@ -179,33 +267,17 @@ def _placement(kind: str, cw: int, ch: int, W: int, H: int, il: dict) -> tuple[i
 
 
 def overlay_illustrations(video: Path, items: list[dict], out: Path, cfg: dict) -> Path:
-    if not items:
-        run(["ffmpeg", "-y", "-v", "error", "-i", str(video), "-c", "copy", str(out)])
-        return out
     il = cfg["illustrate"]
     info = probe(video)
     W, H = info["width"], info["height"]
-    fade = float(il["fade"])
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video)]
-    filters, prev = [], "[0:v]"
-    for i, it in enumerate(items):
+    layers = []
+    for it in items:
         kind = it.get("kind", "object")
-        cw, ch = canvas_for(kind, cfg)
+        from PIL import Image
+        with Image.open(it["png"]) as im:
+            cw, ch = im.size
         x, y, tw, th = _placement(kind, cw, ch, W, H, il)
-        s, dur = float(it["start"]), float(it["duration"])
-        cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", it["png"]]
-        filters.append(
-            f"[{i + 1}:v]scale={tw}:{th}:flags=lanczos,format=rgba,"
-            f"fade=t=in:st=0:d={fade}:alpha=1,fade=t=out:st={max(0.0, dur - fade):.3f}:d={fade}:alpha=1,"
-            f"setpts=PTS-STARTPTS+{s:.3f}/TB[ov{i}]")
-        nxt = f"[v{i}]" if i < len(items) - 1 else "[vout]"
-        filters.append(f"{prev}[ov{i}]overlay={x}:{y}:format=auto:eof_action=pass:enable='between(t,{s:.3f},{s + dur:.3f})'{nxt}")
-        prev = nxt
-    script = out.with_suffix(".filter.txt")
-    script.write_text(";\n".join(filters), encoding="utf-8")
-    m = cfg["mosaic"]
-    cmd += ["-/filter_complex", str(script), "-map", "[vout]", "-map", "0:a?", "-c:v", "libx264", "-crf", str(m["crf"]),
-            "-preset", m["preset"], "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(out)]
-    run(cmd)
-    script.unlink(missing_ok=True)
-    return out
+        s = float(it["start"])
+        layers.append({"png": it["png"], "start": s, "end": s + float(it["duration"]), "x": x, "y": y, "w": tw, "h": th,
+                       "fade": float(il["fade"])})
+    return compose(video, layers, out, cfg)
