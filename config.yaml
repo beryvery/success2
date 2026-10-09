@@ -1,0 +1,73 @@
+# ============================================================
+#  영상 자동 편집 파이프라인 설정
+# ============================================================
+whisper:
+  model: small           # tiny | base | small | medium | large-v3  (클수록 정확, 느림)
+  language: ko
+  device: cpu
+  compute_type: int8
+
+cut:
+  # 무음 구간 제거
+  silence_db: -35          # 이 dB 이하를 무음으로 간주
+  min_silence: 0.6         # 이 길이(초) 이상 무음이면 잘라냄
+  keep_silence: 0.18       # 잘라낼 때 앞뒤로 남겨둘 여백(초)
+  # 필러워드 제거
+  fillers: ["어", "음", "엄", "어어", "으음", "음음", "저기"]   # "그","아" 는 실제 단어와 겹쳐 제외
+  filler_max_len: 1.2      # 이 길이(초) 넘는 단어는 필러로 안 봄
+  filler_pad: 0.04         # 필러 앞뒤 여백(초)
+  min_segment: 0.15        # 이보다 짧은 조각은 버림
+
+detect:
+  sample_interval: 0.5     # OCR/얼굴 검사 간격(초)
+  frame_width: 1280        # 분석용 프레임 폭
+  faces: false             # 얼굴 모자이크 (출연자 얼굴도 가려지므로 기본 off)
+  box_margin: 0.12         # 검출 박스 확장 비율
+  hold_seconds: 0.6        # 검출이 끊겨도 이만큼 유지(깜빡임 방지)
+  # 텍스트 개인정보 (정규식, Claude 없어도 동작)
+  pii_regex:
+    전화번호: '(?<!\d)(01[016789][-.\s]?\d{3,4}[-.\s]?\d{4}|0\d{1,2}[-.\s]?\d{3,4}[-.\s]?\d{4})(?!\d)'
+    이메일: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+    주민번호: '(?<!\d)\d{6}[-\s]?[1-4]\d{6}(?!\d)'
+    카드번호: '(?<!\d)(\d{4}[-\s]?){3}\d{4}(?!\d)'
+    계좌번호: '(?<!\d)\d{2,6}[-]\d{2,6}[-]\d{2,8}(?:[-]\d{1,6})?(?!\d)'
+    차량번호: '\d{2,3}[가-힣]\s?\d{4}'
+    주소: '[가-힣]+(시|도)\s?[가-힣]+(구|군|시)\s?[가-힣0-9]+(로|길|동)\s?\d+'
+  # 상표/브랜드명 텍스트 (OCR 결과와 대조, 소문자)
+  brand_words: ["samsung", "삼성", "apple", "iphone", "lg", "nike", "adidas", "starbucks", "스타벅스",
+                "coca-cola", "coca cola", "코카콜라", "google", "youtube", "netflix", "disney", "hyundai", "현대", "kia", "기아",
+                "louis vuitton", "gucci", "chanel", "prada", "hermes", "dior", "bmw", "mercedes", "tesla", "sony", "nintendo"]
+  # Claude 사용 (API 키 있을 때)
+  claude_text_classify: true   # OCR 문장 중 이름/주소/상표를 LLM(Claude/GPT)이 추가 판별
+  claude_logo_detect: true     # 그림 로고/상표를 LLM 비전으로 검출
+  logo_scene_threshold: 0.25   # 장면 변화 감지 민감도(0~1, 낮을수록 민감)
+  logo_max_interval: 6         # 장면이 안 바뀌어도 이 간격(초)마다 재검사
+
+mosaic:
+  block: 16                # 모자이크 블록 크기(px, 1080p 기준 자동 스케일)
+  crf: 18
+  preset: medium
+
+illustrate:
+  enabled: true
+  max_count: 8               # 영상당 최대 삽입 수
+  min_gap: 45                # 삽입 간 최소 간격(초)
+  duration: 5                # 기본 노출 시간(초)
+  fade: 0.3
+  # object(아이콘/사물 하나, 투명배경) → 화면 한쪽에 얹음
+  object_canvas: [800, 800]
+  object_width: 0.26         # 화면 폭 대비 크기
+  object_position: right     # right | left   (세로는 중앙)
+  # card(장면/관계/흐름 설명) → 중앙 카드
+  card_canvas: [1200, 800]
+  card_width: 0.56           # 화면 폭 대비 크기
+  style: |
+    깔끔한 플랫 벡터 일러스트에 손그림 카툰 느낌을 아주 살짝만 얹은 스타일.
+    일정한 굵기의 둥근 외곽선(#2B2B2B, 5~6px, 미세한 손그림 흔들림만), 파스텔 3~4색 제한 팔레트
+    (#FFB4A2, #B5EAD7, #C7CEEA, #FFDAC1, #E2F0CB 중 선택), 단순한 기하 도형, 여백 넉넉,
+    그림자·그라데이션·질감·장식 없음. 글자는 최소(최대 2단어)이며 꼭 필요할 때만.
+
+llm:
+  provider: auto               # auto | claude | openai   (auto: Claude 키 있으면 Claude, 없으면 GPT)
+  claude_model: claude-opus-5-5
+  openai_model: gpt-5          # 계정에서 쓸 수 있는 모델명으로 변경 가능 (예: gpt-5-mini, gpt-4.1)

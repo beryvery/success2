@@ -1,0 +1,23 @@
+# ── 비밀 키 (절대 커밋 금지) ──
+api_keys.txt
+.env
+.env.*
+!.env.example
+
+# ── 가상환경 / 캐시 ──
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+
+# ── 작업 산출물 ──
+out/
+work/
+uploads/
+samples/voice.aiff
+
+# ── OS / 에디터 ──
+.DS_Store
+.idea/
+.vscode/

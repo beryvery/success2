@@ -1,0 +1,12 @@
+faster-whisper
+numpy
+pillow
+pyyaml
+anthropic
+pyobjc-framework-Vision
+pyobjc-framework-Quartz
+resvg-py
+pytest
+openai
+streamlit
+pandas
