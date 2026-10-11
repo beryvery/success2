@@ -9,6 +9,7 @@
   --no-claude    LLM(Claude/GPT) 사용 안 함 (정규식/OCR만)
   --faces        얼굴도 모자이크
   --dry-run      계획(컷 목록/검출 목록)만 만들고 영상 인코딩은 생략
+  --drive-folder 구글 드라이브 폴더 ID. 완료 후 결과 영상과 report.md 를 업로드 (환경변수 GDRIVE_SERVICE_ACCOUNT_JSON 필요)
 """
 from __future__ import annotations
 
@@ -92,6 +93,7 @@ def main(argv=None):
     ap.add_argument("--no-claude", action="store_true")
     ap.add_argument("--faces", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--drive-folder", default=None, help="결과를 올릴 구글 드라이브 폴더 ID (config drive.folder_id 보다 우선)")
     args = ap.parse_args(argv)
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
@@ -189,6 +191,21 @@ def main(argv=None):
             log(f"완료 → {final}")
         write_report(work, cuts, det, ills, final, vis)
         log(f"리포트: {work / 'report.md'}")
+
+        # 6. 구글 드라이브 업로드 (선택)
+        folder = args.drive_folder or (cfg.get("drive") or {}).get("folder_id")
+        if folder and final:
+            from editpipe import drive
+            if not drive.available():
+                log("드라이브 업로드 건너뜀: 환경변수 GDRIVE_SERVICE_ACCOUNT_JSON(또는 _FILE) 없음")
+            else:
+                report_copy = out_root / f"{src.stem}_report.md"
+                shutil.copyfile(work / "report.md", report_copy)
+                try:
+                    for r in drive.upload_many([final, report_copy], folder):
+                        log(f"드라이브 업로드: {r['name']} → {r.get('webViewLink')}")
+                except RuntimeError as e:
+                    log(f"드라이브 업로드 실패: {e}")
 
 
 if __name__ == "__main__":

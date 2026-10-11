@@ -99,6 +99,12 @@
 - `mosaic.block` : 모자이크 블록 크기
 - `illustrate.*` : 삽입 개수/간격/길이, pip(우측 카드)·full 레이아웃, 스타일 지시문
 
+## 구글 드라이브 업로드 (선택)
+- `python pipeline.py 영상.mp4 --drive-folder <폴더ID>` 또는 `config.yaml` 의 `drive.folder_id` 를 채우면 완료 후 `<이름>_edited.mp4` 와 `<이름>_report.md` 를 올립니다.
+- 인증: 서비스 계정 키를 환경변수 `GDRIVE_SERVICE_ACCOUNT_JSON`(JSON 문자열) 또는 `GDRIVE_SERVICE_ACCOUNT_FILE`(경로)에 넣고, 대상 폴더를 서비스 계정 이메일(`client_email`)에 **편집자**로 공유합니다.
+- 개인 계정(My Drive)에서는 서비스 계정이 새 파일을 만들 수 없습니다(구글 정책: 서비스 계정은 저장 용량 없음). 같은 이름의 파일이 폴더에 이미 있으면 그 파일의 **내용을 교체**하는 방식으로 올라가므로, 처음 한 번만 빈 파일을 같은 이름으로 만들어 두면 이후 자동 갱신됩니다. Workspace 공유 드라이브에서는 바로 생성됩니다.
+- 단독 실행: `python -m editpipe.drive <폴더ID> 파일1 파일2 ...`
+
 ## 동작 방식 요약
 - 무음: ffmpeg `silencedetect` → 기준 이상 무음을 앞뒤 여백만 남기고 제거. 전사 단어가 0개(말소리 없는 영상)면 무음 컷을 건너뛰고 전체를 유지하며, 키워드·챕터도 만들지 않음
 - 필러: Whisper 단어 타임스탬프 중 필러 목록과 일치하는 단어 구간 제거 ("그", "아" 처럼 실제 단어와 겹치는 것은 기본 제외)

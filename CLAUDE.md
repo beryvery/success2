@@ -25,6 +25,7 @@
 | `editpipe/compose.py` | 공통 PNG 오버레이 합성기 (rawvideo 파이프 + numpy 알파 블렌딩, 페이드). 모든 오버레이는 이걸 통해서만 |
 | `editpipe/visuals.py` | 자막(전사 기반, PII 마스킹)·키워드 lower-third·챕터 칩을 PIL 로 렌더 후 compose |
 | `editpipe/llm_client.py` | Claude(Anthropic SDK)·GPT(OpenAI SDK) 공통 호출. 키는 `api_keys.txt` → `.env` → 환경변수 순 |
+| `editpipe/drive.py` | 구글 드라이브 업로드(서비스 계정, 키는 환경변수 `GDRIVE_SERVICE_ACCOUNT_JSON`). 개인 드라이브는 같은 이름 파일 내용 교체 방식 |
 | `config.yaml` | 모든 기본값(무음 기준, 필러 목록, 정규식, 모자이크 강도, 일러스트 스타일, 모델명) |
 
 ## 작업 산출물 규칙

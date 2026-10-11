@@ -87,3 +87,8 @@ llm:
   provider: auto               # auto | claude | openai   (auto: Claude 키 있으면 Claude, 없으면 GPT)
   claude_model: claude-opus-5-5
   openai_model: gpt-5          # 계정에서 쓸 수 있는 모델명으로 변경 가능 (예: gpt-5-mini, gpt-4.1)
+
+# 구글 드라이브 업로드 (선택). 서비스 계정 키는 환경변수 GDRIVE_SERVICE_ACCOUNT_JSON(JSON 문자열) 또는 GDRIVE_SERVICE_ACCOUNT_FILE(경로).
+# 폴더는 서비스 계정 이메일에 '편집자' 로 공유해 둘 것. 개인 드라이브에서는 같은 이름의 파일이 있어야 내용 교체 방식으로 올라감 (editpipe/drive.py 참고).
+drive:
+  folder_id: ""              # 비우면 업로드 안 함. CLI --drive-folder 가 있으면 그것을 우선
