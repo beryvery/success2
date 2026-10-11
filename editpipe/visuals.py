@@ -13,13 +13,31 @@ from .media import fmt_time, probe
 
 FONT_TTC = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
 FONT_IDX = {"regular": 0, "medium": 2, "semibold": 4, "bold": 6, "extrabold": 14}
+# macOS 가 아닐 때 쓰는 한글 폰트 후보 (apt: fonts-noto-cjk, fonts-nanum). 앞에 있는 것 우선.
+FONT_FALLBACK = {
+    "regular": ["/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/nanum/NanumSquareRoundR.ttf",
+                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"],
+    "bold": ["/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", "/usr/share/fonts/truetype/nanum/NanumSquareRoundB.ttf",
+             "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"],
+}
+_FONT_WARNED = False
 
 
 def font(size: int, weight: str = "bold") -> ImageFont.FreeTypeFont:
+    global _FONT_WARNED
     try:
         return ImageFont.truetype(FONT_TTC, size, index=FONT_IDX.get(weight, 6))
     except OSError:
-        return ImageFont.load_default(size)
+        pass
+    for path in FONT_FALLBACK["regular" if weight in ("regular", "medium") else "bold"]:
+        try:
+            return ImageFont.truetype(path, size, index=0)   # Noto CJK ttc 의 index 0 = JP 이지만 한글 글리프 포함
+        except OSError:
+            continue
+    if not _FONT_WARNED:
+        _FONT_WARNED = True
+        print("  [visuals] 한글 폰트를 찾지 못해 기본 폰트로 렌더합니다 (한글이 □ 로 보일 수 있음). fonts-noto-cjk 또는 fonts-nanum 설치 권장.")
+    return ImageFont.load_default(size)
 
 
 # ───────────── 자막 ─────────────

@@ -19,7 +19,7 @@
 | `editpipe/media.py` | ffprobe/ffmpeg 헬퍼 (`probe`, `extract_audio`, `extract_frames`) |
 | `editpipe/transcribe.py` | faster-whisper 단어 타임스탬프, 컷 후 타임라인 재매핑 `remap_transcript` |
 | `editpipe/cuts.py` | 무음(ffmpeg silencedetect) + 필러 검출 → `cuts.json` → trim/atrim+concat 으로 재인코딩 |
-| `editpipe/detect.py` | Vision OCR·얼굴 검출, 정규식/브랜드 사전, LLM 텍스트 판별·로고 비전 검출, 트랙 병합 |
+| `editpipe/detect.py` | Vision OCR(Linux 는 tesseract 폴백)·얼굴 검출, 정규식/브랜드 사전, LLM 텍스트 판별·로고 비전 검출, 트랙 병합 |
 | `editpipe/mosaic.py` | ffmpeg rawvideo 파이프 ↔ numpy 픽셀화 (OpenCV 미사용) |
 | `editpipe/illustrate.py` | LLM 계획 → 그림 생성(`gpt-image`: OpenAI images API 투명 PNG / `svg`: LLM SVG → resvg) → compose 오버레이. `object`(투명, 화면 한쪽) / `card`(중앙 카드). ThreadPool 병렬 |
 | `editpipe/compose.py` | 공통 PNG 오버레이 합성기 (rawvideo 파이프 + numpy 알파 블렌딩, 페이드). 모든 오버레이는 이걸 통해서만 |
@@ -33,7 +33,7 @@
 - 타임스탬프는 **컷 편집 이후 타임라인** 기준(`transcript_cut.json`). 검출·일러스트는 모두 `1_cut.mp4` 기준으로 계산.
 
 ## 코드 작성 시 지킬 것
-- ffmpeg 9 기준: 필터 그래프가 길면 `-/filter_complex <파일>` 사용 (`-filter_complex_script` 는 제거됨). `drawtext`·`subtitles`(libass) 는 이 빌드에 없음 → 텍스트/자막은 PIL 로 PNG 렌더 후 `compose.py` 로 합성.
+- ffmpeg 9 기준: 필터 그래프가 길면 `-/filter_complex <파일>` 사용 (`-filter_complex_script` 는 제거됨). 옵션은 `media.filter_script_args()` 로 만들면 ffmpeg 6 이하에서 자동으로 구형 옵션을 쓴다. `drawtext`·`subtitles`(libass) 는 이 빌드에 없음 → 텍스트/자막은 PIL 로 PNG 렌더 후 `compose.py` 로 합성.
 - `faster-whisper`(av) 와 OpenCV 를 한 프로세스에 함께 import 하면 libavdevice 충돌 → OpenCV 를 쓰지 않는다.
 - LLM 호출은 반드시 `llm_client.ask / ask_json` 을 통해서만. Claude 는 `client.beta.messages.create(... fallbacks="default", betas=["server-side-fallback-2026-07-01"])`, 응답의 `stop_reason` 확인. 모델명은 `config.yaml llm.*` 에서만 읽는다.
 - LLM 이 반환한 SVG 는 `_sanitize_svg` 로 `<script>`/`<image>` 제거 + XML 검증 후 렌더.

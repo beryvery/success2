@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from .media import fmt_time, probe, run
+from .media import filter_script_args, fmt_time, probe, run
 
 
 # ---------- 무음 검출 (ffmpeg silencedetect) ----------
@@ -115,7 +115,7 @@ def apply_cuts(video: Path, plan: dict, out: Path, cfg: dict) -> Path:
     script = out.with_suffix(".filter.txt")
     script.write_text(";\n".join(parts), encoding="utf-8")
     m = cfg["mosaic"]
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-/filter_complex", str(script), "-map", "[vout]"]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video), *filter_script_args(script), "-map", "[vout]"]
     if has_a:
         cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
     cmd += ["-c:v", "libx264", "-crf", str(m.get("crf", 18)), "-preset", m.get("preset", "medium"),

@@ -13,6 +13,7 @@
 
 ## 요구 사항
 - macOS (OCR·얼굴검출에 Apple Vision 프레임워크 사용), Python 3.11, ffmpeg (`brew install ffmpeg`)
+  - Linux 에서도 동작합니다(폴백): OCR 은 tesseract(`apt install tesseract-ocr tesseract-ocr-kor` + `pip install pytesseract`), 자막 폰트는 `fonts-noto-cjk` 또는 `fonts-nanum`. 얼굴 검출은 Linux 에서 비활성. ffmpeg 6 은 `-filter_complex_script` 로 자동 전환.
 - LLM API 키: **Claude 또는 GPT(OpenAI) 중 하나 이상** (일러스트 생성, 이름/상표 판별, 로고 검출에 필요. 없으면 정규식·OCR만으로 동작)
   - 프로젝트 폴더의 **`api_keys.txt`** 파일을 열어 키를 넣습니다. (숨김 파일 `.env` 도 같은 역할, 둘 중 아무거나)
     ```

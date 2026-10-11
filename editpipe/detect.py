@@ -1,4 +1,4 @@
-"""개인정보/상표 검출: macOS Vision OCR + 얼굴 검출 + 정규식 + (선택) Claude 판별/로고 검출."""
+"""개인정보/상표 검출: OCR(macOS Vision, 그 외 OS 는 tesseract 폴백) + 얼굴 검출 + 정규식 + (선택) Claude 판별/로고 검출."""
 from __future__ import annotations
 
 import json
@@ -15,15 +15,23 @@ from .media import extract_frames, probe
 Box = list[float]  # [x0, y0, x1, y1] normalized 0~1, origin top-left
 
 
-# ---------- macOS Vision ----------
+# ---------- OCR 백엔드 ----------
+def _has_vision() -> bool:
+    """macOS 의 Apple Vision 사용 가능 여부 (Linux/Windows 에서는 False → tesseract 폴백)."""
+    try:
+        import Vision, Quartz  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _ci_image(path: Path):
     import Quartz
     url = Quartz.CFURLCreateWithFileSystemPath(None, str(path), Quartz.kCFURLPOSIXPathStyle, False)
     return Quartz.CIImage.imageWithContentsOfURL_(url)
 
 
-def ocr_image(path: Path) -> list[dict]:
-    """[{text, box}] (box normalized, top-left origin)"""
+def _ocr_vision(path: Path) -> list[dict]:
     import Vision
     req = Vision.VNRecognizeTextRequest.alloc().init()
     req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
@@ -46,7 +54,47 @@ def ocr_image(path: Path) -> list[dict]:
     return out
 
 
+def _ocr_tesseract(path: Path, langs: str = "kor+eng", min_conf: float = 40.0) -> list[dict]:
+    """macOS 가 아닐 때의 폴백: tesseract(pytesseract). 단어를 줄(line) 단위로 묶어 Vision 과 같은 형식으로 반환."""
+    import pytesseract
+    img = Image.open(path).convert("RGB")
+    W, H = img.size
+    data = pytesseract.image_to_data(img, lang=langs, config="--psm 11", output_type=pytesseract.Output.DICT)
+    lines: dict[tuple, dict] = {}
+    for i, txt in enumerate(data["text"]):
+        txt = (txt or "").strip()
+        try:
+            conf = float(data["conf"][i])
+        except (TypeError, ValueError):
+            conf = -1.0
+        if not txt or conf < min_conf:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        x0, y0 = data["left"][i], data["top"][i]
+        x1, y1 = x0 + data["width"][i], y0 + data["height"][i]
+        ln = lines.setdefault(key, {"words": [], "confs": [], "box": [x0, y0, x1, y1]})
+        ln["words"].append(txt)
+        ln["confs"].append(conf)
+        b = ln["box"]
+        ln["box"] = [min(b[0], x0), min(b[1], y0), max(b[2], x1), max(b[3], y1)]
+    out = []
+    for ln in lines.values():
+        b = ln["box"]
+        out.append({"text": " ".join(ln["words"]), "conf": sum(ln["confs"]) / len(ln["confs"]) / 100.0,
+                    "box": [b[0] / W, b[1] / H, b[2] / W, b[3] / H]})
+    return out
+
+
+def ocr_image(path: Path) -> list[dict]:
+    """[{text, conf, box}] (box normalized 0~1, top-left origin). macOS→Vision, 그 외→tesseract."""
+    if _has_vision():
+        return _ocr_vision(path)
+    return _ocr_tesseract(path)
+
+
 def detect_faces(path: Path) -> list[Box]:
+    if not _has_vision():
+        return []   # Linux 폴백 없음 (config detect.faces 는 기본 off)
     import Vision
     req = Vision.VNDetectFaceRectanglesRequest.alloc().init()
     handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(_ci_image(path), None)

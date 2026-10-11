@@ -16,6 +16,26 @@ def run(cmd: list[str], quiet: bool = True) -> subprocess.CompletedProcess:
     return r
 
 
+_FFMPEG_MAJOR: int | None = None
+
+
+def ffmpeg_major() -> int:
+    """설치된 ffmpeg 메이저 버전 (파싱 실패 시 7 로 가정)."""
+    global _FFMPEG_MAJOR
+    if _FFMPEG_MAJOR is None:
+        try:
+            first = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True).stdout.splitlines()[0]
+            _FFMPEG_MAJOR = int(first.split()[2].lstrip("n").split(".")[0])
+        except Exception:
+            _FFMPEG_MAJOR = 7
+    return _FFMPEG_MAJOR
+
+
+def filter_script_args(script: str | Path) -> list[str]:
+    """필터 그래프 파일 전달 옵션. ffmpeg 7+ 는 `-/filter_complex`, 6 이하는 `-filter_complex_script`."""
+    return ["-/filter_complex" if ffmpeg_major() >= 7 else "-filter_complex_script", str(script)]
+
+
 def is_image(path: str | Path) -> bool:
     return Path(path).suffix.lower() in IMAGE_EXT
 
