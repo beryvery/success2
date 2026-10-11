@@ -133,10 +133,33 @@ JSON 배열로만 답하세요: [{"i": 인덱스, "type": "pii"|"brand"|null, "l
 
 LOGO_PROMPT = """이 영상 프레임에서 상표권/지식재산권 보호 대상인 **그래픽 로고, 브랜드 마크, 캐릭터, 포스터/앨범 커버, 제품 패키지의 브랜드 표시**를 모두 찾으세요.
 텍스트만 있는 자막은 제외합니다 (별도 처리됨). 사람 얼굴도 제외.
-각 항목의 위치를 프레임 기준 정규화 좌표(0~1, 좌상단 원점)로 주세요. 박스는 대상을 완전히 덮도록 약간 넉넉하게.
+이미지 위에 10×10 격자와 좌표 눈금(0.0~1.0, 좌상단 원점)이 그려져 있습니다. 눈금을 기준으로 각 항목의 위치를 정규화 좌표로 주세요.
+박스는 대상을 완전히 덮도록 약간 넉넉하게. 확실히 식별되는 것만, 배경에 흐릿하게 보이는 것은 제외.
 JSON 배열로만 답하세요. 없으면 []:
 [{"label": "브랜드/대상 이름", "box": [x0, y0, x1, y1]}]
 """
+
+
+def grid_frame(frame: Path, n: int = 10) -> Path:
+    """LLM 로고 검출용: 프레임 위에 n×n 격자와 좌표 눈금을 그려 저장 (좌표 정확도 향상)."""
+    from PIL import ImageDraw, ImageFont
+    im = Image.open(frame).convert("RGB")
+    W, H = im.size
+    dr = ImageDraw.Draw(im, "RGBA")
+    try:
+        f = ImageFont.load_default(max(12, W // 70))
+    except TypeError:
+        f = ImageFont.load_default()
+    for i in range(1, n):
+        x, y = W * i / n, H * i / n
+        dr.line([(x, 0), (x, H)], fill=(255, 255, 0, 110), width=1)
+        dr.line([(0, y), (W, y)], fill=(255, 255, 0, 110), width=1)
+        lab = f"{i / n:.1f}"
+        dr.text((x + 2, 2), lab, fill=(255, 255, 0, 255), font=f)
+        dr.text((2, y + 2), lab, fill=(255, 255, 0, 255), font=f)
+    out = frame.with_name(frame.stem + "_grid.jpg")
+    im.save(out, quality=85)
+    return out
 
 
 def classify_text_claude(texts: list[str], cfg: dict) -> dict[str, tuple[str, str]]:
@@ -155,7 +178,7 @@ def classify_text_claude(texts: list[str], cfg: dict) -> dict[str, tuple[str, st
 
 
 def detect_logos_claude(frame: Path, cfg: dict) -> list[dict]:
-    res = llm.ask_json(cfg, LOGO_PROMPT, images=[frame], effort="low")
+    res = llm.ask_json(cfg, LOGO_PROMPT, images=[grid_frame(frame)], effort="low")
     out = []
     for r in res or []:
         b = r.get("box")
@@ -190,21 +213,23 @@ def _expand(b: Box, m: float) -> Box:
 
 
 def build_tracks(hits: list[dict], interval: float, hold: float, margin: float) -> list[dict]:
-    """hits: [{t, type, label, box}] → 시간 연속 트랙 [{start,end,type,label,box}]"""
+    """hits: [{t, type, label, box, (t_end)}] → 시간 연속 트랙 [{start,end,type,label,box}]
+    t_end 가 있으면(로고처럼 다음 검사 시점까지 유효한 검출) 그때까지 트랙을 유지한다."""
     tracks: list[dict] = []
     for h in sorted(hits, key=lambda x: x["t"]):
         box = _expand(h["box"], margin)
+        end = max(h["t"] + interval, float(h.get("t_end", 0.0))) + hold
         best = None
         for tr in tracks:
             if tr["type"] == h["type"] and h["t"] - tr["end"] <= interval + hold + 1e-6 and _iou(tr["box"], box) > 0.3:
                 best = tr
                 break
         if best:
-            best["end"] = h["t"] + interval + hold
+            best["end"] = max(best["end"], end)
             best["box"] = [min(best["box"][0], box[0]), min(best["box"][1], box[1]), max(best["box"][2], box[2]), max(best["box"][3], box[3])]
             best["count"] += 1
         else:
-            tracks.append({"start": max(0.0, h["t"] - hold), "end": h["t"] + interval + hold, "type": h["type"],
+            tracks.append({"start": max(0.0, h["t"] - hold), "end": end, "type": h["type"],
                            "label": h["label"], "box": box, "count": 1})
     for t in tracks:
         t["start"], t["end"] = round(t["start"], 3), round(t["end"], 3)
@@ -250,11 +275,17 @@ def detect_video(video: Path, work: Path, cfg: dict, force: bool = False, use_cl
     # LLM 로고 검출 (프레임별 병렬)
     if logo_jobs:
         logo_frames = len(logo_jobs)
+        video_end = frames[-1][0] + interval if frames else 0.0
+        next_check = {t: (logo_jobs[i + 1][0] if i + 1 < len(logo_jobs) else video_end) for i, (t, _) in enumerate(logo_jobs)}
 
         def _logo(job):
             t, fp = job
             try:
-                return [{"t": t, "type": "brand", "label": f"로고: {lg['label']}", "box": lg["box"]} for lg in detect_logos_claude(fp, cfg)]
+                # 장면이 바뀌기 전(다음 로고 검사 시점)까지는 같은 로고가 계속 보인다고 보고 트랙을 유지
+                # LLM 좌표는 근사치이고 손/카메라가 움직이므로 OCR 박스보다 여백을 더 준다 (detect.logo_box_margin)
+                lm = float(d.get("logo_box_margin", 0.3))
+                return [{"t": t, "t_end": next_check[t], "type": "brand", "label": f"로고: {lg['label']}", "box": _expand(lg["box"], lm)}
+                        for lg in detect_logos_claude(fp, cfg)]
             except RuntimeError as e:
                 print(f"  [로고검출 건너뜀 {t:.1f}s] {e}")
                 return []
@@ -312,7 +343,7 @@ def detect_image(image: Path, cfg: dict, use_claude: bool = True) -> list[dict]:
                 if txt in cl:
                     hits.append({"type": cl[txt][0], "label": f"{cl[txt][1]}: {txt}", "box": _expand(box, float(d["box_margin"]))})
             if d.get("claude_logo_detect"):
-                hits += [{"type": "brand", "label": f"로고: {l['label']}", "box": _expand(l["box"], float(d["box_margin"]))}
+                hits += [{"type": "brand", "label": f"로고: {l['label']}", "box": _expand(l["box"], float(d["box_margin"]) + float(d.get("logo_box_margin", 0.3)))}
                          for l in detect_logos_claude(image, cfg)]
         except RuntimeError as e:
             print(f"  [Claude 판별 건너뜀] {e}")

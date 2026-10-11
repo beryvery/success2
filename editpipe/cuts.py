@@ -84,9 +84,19 @@ def plan_cuts(video: Path, transcript: dict, work: Path, cfg: dict, force: bool 
         return json.loads(out.read_text(encoding="utf-8"))
     c = cfg["cut"]
     info = probe(video)
-    silences = detect_silence(video, float(c["silence_db"]), float(c["min_silence"]))
-    fillers = find_fillers(transcript["words"], c["fillers"], float(c["filler_max_len"]), float(c["filler_pad"]))
+    words = transcript.get("words") or []
+    note = ""
+    if words:
+        silences = detect_silence(video, float(c["silence_db"]), float(c["min_silence"]))
+    else:
+        # 말소리가 전혀 없는 영상(제품 촬영·BGM 등)은 '무음' 기준이 의미 없으므로 컷하지 않고 전체를 유지
+        silences = []
+        note = "음성(전사 단어)이 없어 무음 컷을 생략했습니다. 그래도 자르려면 cuts.json 을 직접 편집하세요."
+        print(f"  [컷 편집] {note}")
+    fillers = find_fillers(words, c["fillers"], float(c["filler_max_len"]), float(c["filler_pad"]))
     plan = build_cut_list(info["duration"], silences, fillers, c)
+    if note:
+        plan["note"] = note
     out.write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
     with open(work / "cuts_review.csv", "w", newline="", encoding="utf-8-sig") as f:
         wr = csv.writer(f)

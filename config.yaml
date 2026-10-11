@@ -23,6 +23,7 @@ detect:
   frame_width: 1280        # 분석용 프레임 폭
   faces: false             # 얼굴 모자이크 (출연자 얼굴도 가려지므로 기본 off)
   box_margin: 0.12         # 검출 박스 확장 비율
+  logo_box_margin: 0.3     # LLM 로고 검출 박스에 추가로 주는 여백 (좌표가 근사치 + 손/카메라 움직임 대비)
   hold_seconds: 0.6        # 검출이 끊겨도 이만큼 유지(깜빡임 방지)
   # 텍스트 개인정보 (정규식, Claude 없어도 동작)
   pii_regex:

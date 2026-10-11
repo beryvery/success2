@@ -163,7 +163,9 @@ def plan_visuals(script: str, transcript: dict, work: Path, cfg: dict, force: bo
     v = cfg["visuals"]
     data = {"subtitles": build_subtitles(transcript, int(v["subtitle"]["max_chars"]), pii_regex=cfg["detect"]["pii_regex"]),
             "chapters": [], "keywords": []}
-    if (v.get("keywords") or v.get("chapters")) and llm.available(cfg):
+    if not transcript.get("segments") and not script:
+        data["note"] = "음성(전사)이 없어 키워드·챕터를 생성하지 않았습니다."
+    elif (v.get("keywords") or v.get("chapters")) and llm.available(cfg):
         timeline = "\n".join(f"[{fmt_time(s['start'])}] {s['text']}" for s in transcript["segments"])
         prompt = VIS_PROMPT.format(chapter_max=v["chapter_max"], keyword_max=v["keyword_max"], timeline=timeline,
                                    script_note=" 과 대본" if script else "",
